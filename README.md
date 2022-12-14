@@ -45,3 +45,197 @@ xterm -fa 'Monospace' -fs 14 -e java LamportMainProcess.java 2 p2
 6. Run the bash script using sh run.sh to execute.
 7. The Process0 sends Lamport Event-0, Process1 sends Lamport Event-1 and Process2 sends
 Lamport Event-2.
+
+SAMPLE CODE:
+
+
+package assignment1;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.*;
+
+public class LamportMainProcess {
+    public static void main(String  [] args) throws IOException, InterruptedException {
+        LamportMultiCastAlgorithm lamport = new LamportMultiCastAlgorithm();
+        String param1 = args[0];
+        String param2 = args[1];
+        lamport.startProcess(param1, param2);
+    }
+}
+
+class LamportEvent implements Serializable {
+
+    public LamportEvent(String processIdString, int processId, int logicalTime, String eventId, boolean acknowledgement) {
+        this.processIdString = processIdString;
+        this.processId = processId;
+        this.logicalTime = logicalTime;
+        this.eventId = eventId;
+        this.acknowledgement = acknowledgement;
+    }
+
+    private int processId;
+
+    private String processIdString;
+    private int logicalTime;
+    private String eventId;
+    private boolean acknowledgement;
+
+    public String getProcessIdString() {
+        return processIdString;
+    }
+
+    public int getProcessId() {
+        return processId;
+    }
+
+    public int getLogicalTime() {
+        return logicalTime;
+    }
+
+    public void setLogicalTime(int logicalTime) {
+        this.logicalTime = logicalTime;
+    }
+
+    public String getEventId() {
+        return eventId;
+    }
+
+    public boolean isAcknowledged() {
+        return acknowledgement;
+    }
+
+}
+
+class LamportMultiCastAlgorithm {
+    public static final String COLOUR_MODE_OFF = "\u001B[0m";
+    public static final String RED_MODE = "\u001B[41m";
+    public static final String GREEN_MODE = "\u001B[42m";
+    public static final String YELLOW_MODE = "\u001B[43m";
+    public static String currentColour ;
+    private static ServerSocket serverSocket;
+    public static String processIdString;
+    public static int processIdIdentifier;
+    private static int eventsProcessed = 0;
+    private static int logicalTimeCounter = 0;
+    public static int[] portList = new int[]{8001,8002,8003};
+    public static String[] eventList = new String[]{"LamportEvent-0", "LamportEvent-1", "LamportEvent-2"};
+
+    public static volatile Map<String, Set<String>> acknowledgementBuffer = new HashMap<>();
+    public static volatile List<LamportEvent> lamportEventBuffer = new ArrayList<>();
+
+    // Lamport MultiCastAlgorithm total order algorithm
+    public static Comparator<LamportEvent> customComparator = (a, b) -> (
+            (a.getLogicalTime() != b.getLogicalTime()
+                    && a.getLogicalTime() > b.getLogicalTime())
+                    || (a.getProcessId() > b.getProcessId())) ? 1 : -1;
+
+    // LamportMulti CastAlgorithm clock incrementer
+    public synchronized void incrementLogicalTimeCounter(LamportEvent e){
+        // we need to increment logic time counter for all process incoming from other process
+        // so eliminating current system process as it already time stamped
+        if(e.getProcessId() != processIdIdentifier) {
+            logicalTimeCounter = Math.max(logicalTimeCounter,e.getLogicalTime())+1;
+            e.setLogicalTime(logicalTimeCounter);
+        }
+
+    }
+
+    public void startProcess(String param1, String param2) throws IOException, InterruptedException {
+        processIdIdentifier = Integer.parseInt(param1);
+        processIdString = param2;
+        // start the thread which will manage communications
+        (new Thread(() -> {
+            try {
+                manageCommunications();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        })).start();
+
+        // we are sleeping the process for 1 second, so in the mean time
+        // all the other process will br ready to accept the requests
+        // this is to simulate multi threaded environment on vm
+        Thread.sleep(1000);
+
+        // start the thread to order events
+        (new Thread(() -> deliveredEvents())).start();
+
+
+        // start the thread to manage acknowledgements
+        (new Thread(() -> {
+            try {
+                manageAcknowledgements();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        })).start();
+
+
+        // multicast 2 events from each service. This can be extended to n services
+        if(processIdIdentifier==0) {
+            multicastEvent(new LamportEvent(processIdString, processIdIdentifier, logicalTimeCounter, eventList[0], false));
+        } else if (processIdIdentifier==1){
+            multicastEvent(new LamportEvent(processIdString, processIdIdentifier, logicalTimeCounter, eventList[1], false));
+        }
+        else if (processIdIdentifier==2){
+            multicastEvent(new LamportEvent(processIdString, processIdIdentifier, logicalTimeCounter, eventList[2], false));
+        }
+    }
+
+
+    private void manageAcknowledgements() throws IOException {
+        while (eventsProcessed != eventList.length) {
+            if (!lamportEventBuffer.isEmpty()) {
+                LamportEvent lamportEvent = lamportEventBuffer.get(0);
+                if (canAcknowledge(lamportEvent)) {
+                    incrementLogicalTimeCounter(lamportEvent);
+                    multicastEvent(new LamportEvent(processIdString, processIdIdentifier, logicalTimeCounter, lamportEvent.getEventId(), true));
+
+                    if (acknowledgementBuffer.containsKey(lamportEvent.getEventId())) {
+                        acknowledgementBuffer.get(lamportEvent.getEventId()).add(processIdString);
+                    } else {
+                        Set<String> set = new HashSet<>() {{
+                            add(processIdString);
+                        }};
+                        acknowledgementBuffer.put(lamportEvent.getEventId(), set);
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean canAcknowledge(LamportEvent lamportEvent) {
+        // check if lamportEvent is already acknowledged
+        if(!acknowledgementBuffer.isEmpty()
+                && acknowledgementBuffer.containsKey(lamportEvent.getEventId())
+                && acknowledgementBuffer.get(lamportEvent.getEventId()).contains(processIdString)){
+            return false;
+        }
+
+        // check if its lamportEvent from current process and if it already acknowledged
+        if((lamportEvent.getProcessId() == processIdIdentifier)
+                || ((acknowledgementBuffer.containsKey(eventList[processIdIdentifier])
+                && acknowledgementBuffer.get(eventList[processIdIdentifier]).size() == portList.length))) return true;
+
+
+        // smaller process id will have higher precedence
+        if((logicalTimeCounter == lamportEvent.getLogicalTime()
+                && processIdIdentifier > lamportEvent.getProcessId())
+                ||logicalTimeCounter > lamportEvent.getLogicalTime()){
+            return true;
+        }
+
+        return false;
+    }
+
+    }
+    }
+    }
+
+
